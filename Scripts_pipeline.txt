@@ -1,0 +1,118 @@
+#############################################
+########part 1. construction of eVFGC########
+#############################################
+1. calculating ANI of each species
+fastANI --ql $i --rl $i -o ${i}.tab
+2. blast against VFDB
+makeblastdb -in ${i}.fna -dbtype nucl -parse_seqids
+
+blastn -query VFDB_setA_nt.fas -out ${i}.bls -db ${i}.fna -task  blastn  -outfmt "6 std gaps qcovs qcovhsp sseq" -num_threads 4
+
+3. annotation of mobile elements
+#obtain gbk file
+prokka --outdir kp_ref --prefix kp_ref kp_refence.fasta --cpus 2
+#ICE
+python ICEfinder2.py -i ${i}.gbk -t ${i}
+#prophage
+PhiSpy.py -o ${i} ${i}.gb
+
+######################################
+########part 2. MetaVF toolkit########
+######################################
+#please see details in scripts in MetaVF toolkit
+#for draft genemes
+metaVF.py -p /path/to/MetaVF_toolkit -pjn draft_test -id /path/to/MetaVF_toolkit/example_data/data -o /data/gmp/ssani_snakemake_pipeline/MetaVF_toolkit/example_data/test_draft -m draft -c 10 -ti 90 -tc 80
+
+#for pair-end short reads
+metaVF.py -p /path/to/MetaVF_toolkit -pjn PE_test -id /path/to/MetaVF_toolkit/example_data/data -o /path/to/MetaVF_toolkit/example_data/test_PE -m PE -c 10
+
+###########################################
+########part 3. Benchmark of MetaVF########
+###########################################
+#snpmutator
+snpmutator -r 1 -n 3 -s ${snp_5} -i 0 -d 0 -o ${VFid}_summary_0.05.tsv -v ${VFid}variants_0.05.vcf -m -M ${VFid}_metrics_0.05 -F mutation_0.05 ${VFid}.fna
+
+#insilicoseq
+iss generate --draft ./*.fna --model Hiseq --n_reads 4999900 --output ./cami_medium_0.001
+
+#pathofact
+spades.py --meta -1 ${sample}_1.fastq -2 ${sample}_2.fastq -t 20 -o ./${sample}
+snakemake -s Snakefile --configfile config.yaml --use-conda --rerun-incomplete --cores 24 -p
+
+#shortbred
+./shortbred_identify.py --goi  ./input/VFDB.faa --ref ./input/uniref90.fasta  --markers ./output/VFDB_markers.faa --tmp ./output/VFDB_identify --usearch /data/gmp/software/usearch11.0.667_i86linux32  --muscle /data/gmp/software/muscle3.8.31_i86linux64 --blastp /data/gmp/miniconda3/envs/blast/bin/blastp --makeblastdb /data/gmp/miniconda3/envs/blast/bin/makeblastdb --threads 24
+./shortbred_quantify.py --markers ./output/VFDB_markers.faa --wgs ${sample}_paired_1.fastq.gz ${sample}_paired_2.fastq.gz  --results ./output/${sample}.txt --tmp ./output/VFDB_quantify/${sample} --usearch /data/gmp/software/usearch11.0.667_i86linux32 --threads 24
+
+##################################################
+########part 4 VF anaysis of draft genomes########
+##################################################
+
+#evaluation genome quality of draft genomes
+checkm lineage_wf -t 4 --tab_table -f ./checkm_bin_result.txt ./bin_files ./checkm_result --ali --nt -x fa
+#tree construction
+snippy --outdir ./${i} --ref ./reference/GCA_000240185.2_ASM24018v2_genomic.gbff --ctgs $i --cpus 4 --cleanup
+vcf-merge ./bin.11.fa/snps.vcf.gz ./bin.18.fa/snps.vcf.gz ./bin.22.fa/snps.vcf.gz ./bin.3.fa/snps.vcf.gz ./bin.4.fa/snps.vcf.gz ./bin.9.fa/snps.vcf.gz ./GCA_013349085.1_ASM1334908v1_genomic.fna/snps.vcf.gz ./GCA_015074925.1_ASM1507492v1_genomic.fna/snps.vcf.gz > merge_rmcommensal_new.vcf
+python vcf2phylip.py -i merge_rmcommensal_new.vcf -o merge_rmcommensal_new -f -n -b
+FastTree -nt merge_rmcommensal_new.min4.fasta > merge_rmcommensal_new.tree
+
+#################################################
+########part 5 VF anaysis of short-reads ########
+#################################################
+#raw data calcualtion
+fastqc -t 20 -o ./fastqc_result ./${sample}_1.fastq.gz
+fastqc -t 20 -o ./fastqc_result ./${sample}_2.fastq.gz
+#quality control
+kneaddata -i ${f1} -i ${f2} -o ./T2D_150 -t 12 -db ./software/kneaddata_database --max-memory 20000m --remove-intermediate-output --trimmomatic-options "SLIDINGWINDOW:4:20 MINLEN:50" --trimmomatic-options "LEADING:3" --trimmomatic-options="TRAILING:3"  --sequencer-source TruSeq3  --bowtie2 /data/root/miniconda3/bin/ --bowtie2-options "--very-sensitive --dovetail"  --output-prefix ${name}
+
+#taxonomic profiling of short-reads
+metaphlan ${f1},${f2} --bowtie2out ./T2D_150/${sample}.metagenome.bowtie2.bz2 --bowtie2db ./software/metaplan_db --nproc 10 --input_type fastq --unknown_estimation -o ./T2D_150/${sample}.species_profile
+
+
+################################################
+########part 6 VF anaysis of long-reads ########
+################################################
+
+#assembly of long HiFi reads
+flye --pacbio-hifi ./${i}.fastq -o ./metaflye/${i} -t 20 --meta --read-error 0.01
+
+#assembly evaluation
+quast.py --label ${sample} ./metaflye/${sample}/assembly.fasta -o ${sample}
+
+#binning, refinement and taxonomic annotation
+metawrap binning -o ./metaWRAP_result_metaflye/${sample_name}_initial_binning_maxbin2 -t 24 -m 300 -a ./metaflye/${sample_name}/assembly.fasta --maxbin2  --single-end ./pacbio_ccs_data/${sample_name}.fastq
+metawrap binning -o ./metaWRAP_result_metaflye/${sample_name}_initial_binning_concoct -t 24 -m 300 -a ./metaflye/${sample_name}/assembly.fasta --concoct  --single-end ./pacbio_ccs_data/${sample_name}.fastq
+metawrap binning -o ./metaWRAP_result_metaflye/${sample_name}_initial_binning_metabat2 -t 24 -m 300 -a ./metaflye/${sample_name}/assembly.fasta --metabat2  --single-end ./pacbio_ccs_data/${sample_name}.fastq
+
+metawrap bin_refinement -o ./metaWRAP_result_metaflye/${sample_name}_binning_refinement -A ./metaWRAP_result_metaflye/${sample_name}_initial_binning_concoct/concoct_bins -B ./metaWRAP_result_metaflye/${sample_name}_initial_binning_maxbin2/maxbin2_bins -C ./metaWRAP_result_metaflye/${sample_name}_initial_binning_metabat2/metabat2_bins -t 24 -m 300
+
+gtdbtk classify_wf --genome_dir ./metaWRAP_result_metaflye/${sample_name}_binning_refinement/metawrap_70_10_bins -x fa --out_dir ./metaWRAP_result_metaflye/${sample_name}_gtdb_taxonomic_annotation --cpus 24 --prefix ${sample_name}_gtdbtk
+
+#mobile elements analysis
+#prophage
+virsorter run --keep-original-seq -i $i -w ./virsorter2_result/${i} --include-groups dsDNAphage --min-length 1500 --min-score 0.5 -j 8 all
+checkv end_to_end ./${i}/final-viral-combined.fa ./checkv/$i -t 6 -d checkv-db-v1.1
+virsorter run --seqname-suffix-off --viral-gene-enrich-off --prep-for-dramv -i ./$i/proviruses.fna -w ./virsorter2_result/filter_prophage/${i} --include-groups dsDNAphage --min-length 1500 --min-score 0.5 -j 6 all
+
+
+#ICE (same above)
+#plasmid (viralverify & PlasFlow)
+viralverify -f ./metaflye/${sample}/assembly.fasta -o ./${sample} --hmm /data/home/software/viralverify/nbc_hmms.hmm -t 4 -p
+PlasFlow.py --input ${i}.fasta --output ${i/}_result
+
+#haplotype anaysis
+#find the best reference genome
+dRep dereplicate ../drep -p 6  -g ./*.fa --ignoreGenomeQuality -sa 0.99 --run_tertiary_clustering
+#map long reads to reference genome
+minimap2 -ax map-hifi -H -t 12 -N 1 --secondary=no -o ${sample}.sam ${sample}_${bin}.fa ./pacbio_ccs_data/${sample}.fastq
+#sort and index sam files
+samtools view -bS --threads 3 ${i}.sam > ./${i}.bam
+samtools sort ./${i}.bam -o ./${i}.bam.sort --threads 3
+samtools index ./${i}.bam.sort
+mag_phaser.py -a ${sample}_${bin}.fa -b ${i}.bam.sort  -g ${sample}_${bin}.bed -o ${sample}_${bin}_result --bhFDR 0.01
+
+
+
+
+
+
+
